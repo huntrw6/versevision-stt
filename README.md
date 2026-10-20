@@ -61,3 +61,11 @@ The quick model only *pulls the verse up* in ProPresenter's Bible search; the ca
 result card, which takes ~0.1 s. The verses after it are already in the same search, so reading on is one click each, and the set is refilled when the
 speaker gets within two verses of its end. A verse that did not fit one slide is several cards; the listener moves to the next card when the speaker
 reaches its first words. Every click is checked against the slide ProPresenter reports live.
+
+## One-button on/off (Desktop shortcut)
+
+```sh
+versevision-stt shortcut            # puts "Verse Listener" on the Desktop; click it to start listening, click again to stop
+versevision-stt toggle [--status|--on|--off]
+```
+While it runs the listener keeps the display and system awake (a sleeping screen blocks the accessibility calls that drive ProPresenter).

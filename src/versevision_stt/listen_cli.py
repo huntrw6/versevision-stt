@@ -88,6 +88,12 @@ def listen_command(
         with open(out_log, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 
+    keep_awake: subprocess.Popen | None = None
+    if sys.platform == "darwin" and not dry_run:
+        # A sleeping display or the screen saver blocks the macOS accessibility calls used to drive ProPresenter, so the listener would
+        # hear everything and show nothing. Hold the display and the system awake for as long as this process lives (and wake it now).
+        subprocess.run(["caffeinate", "-u", "-t", "2"], capture_output=True)
+        keep_awake = subprocess.Popen(["caffeinate", "-d", "-i", "-w", str(os.getpid())], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     started_server: subprocess.Popen | None = None
     fast_server: subprocess.Popen | None = None
     if engine == "whisper":
@@ -381,6 +387,8 @@ def listen_command(
             started_server.terminate()
         if fast_server is not None:
             fast_server.terminate()
+        if keep_awake is not None:
+            keep_awake.terminate()
         if bible_ui is not None:
             bible_ui.close()
     typer.echo(f"Stopped. Log: {run_dir}")

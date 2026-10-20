@@ -276,6 +276,7 @@ def uninstall_command(purge: Annotated[bool, typer.Option("--purge", help="Also 
     subprocess.run(["pkill", "-f", "VerseVision STT Listen.app"], capture_output=True)
     subprocess.run(["pkill", "-f", "whisper-server"], capture_output=True)
     removed = []
+    shutil.rmtree(Path.home() / "Desktop" / "Verse Listener.app", ignore_errors=True)
     for target in (p.app, p.vvadd, p.vvbible, p.vvdialog, p.stamp):
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True); removed.append(target.name)
