@@ -1,3 +1,9 @@
+> **VerseVision STT** is the listener half of [VerseVision](https://github.com/huntrw6/versevision), split into its own project. It
+> listens to the sermon with Whisper, recognises spoken Bible references and read verses (following a passage as it is read), and puts
+> them on the ProPresenter output. The sermon-notes importer (documents to ProPresenter slides) lives in
+> [huntrw6/versevision](https://github.com/huntrw6/versevision). This repository still contains the full history and the importer code
+> it was split from; the `versevision listen` command is the part that belongs to this project.
+
 # VerseVision CLI
 
 VerseVision is a Python 3.12+ command-line application for turning Bible references in ordinary documents into explicitly targeted ProPresenter slide imports. It is designed to work without AI, UI automation, AppleScript, simulated input, or accessibility permissions.
