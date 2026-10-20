@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "versevision-stt"
-version = "0.1.2"
+version = "0.2.4"
 description = "Listen to a sermon with Whisper, recognise Bible references and verses, and put them on the ProPresenter output"
 readme = "README.md"
 requires-python = ">=3.12"

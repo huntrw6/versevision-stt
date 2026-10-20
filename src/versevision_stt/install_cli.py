@@ -85,7 +85,7 @@ def build_swift(p: Paths, log: Callable[[str], None] = print, *, force: bool = F
     built = stamp.get("swift", {})
     rebuilt: list[str] = []
     p.home.mkdir(parents=True, exist_ok=True)
-    for name, outputs in (("vvadd", p.vvadd), ("vvdialog", p.vvdialog), ("vvlisten", p.app_binary)):
+    for name, outputs in (("vvadd", p.vvadd), ("vvbible", p.vvbible), ("vvdialog", p.vvdialog), ("vvlisten", p.app_binary)):
         src = _source(f"{name}.swift")
         digest = _sha(src)
         if not force and built.get(name) == digest and outputs.exists():
@@ -222,7 +222,8 @@ def install_command(
         typer.echo("  helper apps: " + (", ".join(rebuilt) + " rebuilt" if rebuilt else "up to date"))
         if not no_whisper:
             typer.echo("  whisper: " + ("built" if build_whisper(p, typer.echo, force=force) else "already built"))
-            typer.echo(f"  model {model}: " + ("downloaded" if fetch_model(p, model, typer.echo) else "already there"))
+            for m in dict.fromkeys([model, "base.en"]):          # base.en is the quick model of the two-speed hearing
+                typer.echo(f"  model {m}: " + ("downloaded" if fetch_model(p, m, typer.echo) else "already there"))
         fetch_bibles(typer.echo)
     except Exception as exc:
         typer.secho(f"Install stopped: {exc}", fg="red")
@@ -245,7 +246,8 @@ def doctor_command() -> None:
     rows: list[tuple[str, bool, str]] = []
     rows.append(("macOS", sys.platform == "darwin", platform.platform()))
     rows.append(("listener app", p.app_binary.exists(), str(p.app)))
-    rows.append(("vvadd (ProPresenter Bible lookup)", p.vvadd.exists(), str(p.vvadd)))
+    rows.append(("vvbible (ProPresenter Bible control)", p.vvbible.exists(), str(p.vvbible)))
+    rows.append(("vvadd (one-shot lookup)", p.vvadd.exists(), str(p.vvadd)))
     rows.append(("vvdialog", p.vvdialog.exists(), str(p.vvdialog)))
     rows.append(("whisper-server", p.whisper_server.exists(), str(p.whisper_server)))
     rows.append(("whisper model small.en", p.model_file("small.en").exists(), str(p.model_file("small.en"))))
@@ -274,7 +276,7 @@ def uninstall_command(purge: Annotated[bool, typer.Option("--purge", help="Also 
     subprocess.run(["pkill", "-f", "VerseVision STT Listen.app"], capture_output=True)
     subprocess.run(["pkill", "-f", "whisper-server"], capture_output=True)
     removed = []
-    for target in (p.app, p.vvadd, p.vvdialog, p.stamp):
+    for target in (p.app, p.vvadd, p.vvbible, p.vvdialog, p.stamp):
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True); removed.append(target.name)
         elif target.exists():

@@ -15,9 +15,10 @@ let outPath = opt("--out")
 var outHandle: FileHandle? = nil
 if let o = outPath { FileManager.default.createFile(atPath: o, contents: nil); outHandle = FileHandle(forWritingAtPath: o) }
 let emitLock = NSLock()
-func emit(_ kind: String, _ text: String, _ t0: Date) {
+func emit(_ kind: String, _ text: String, _ t0: Date, q: String? = nil) {
     emitLock.lock(); defer { emitLock.unlock() }
-    let o: [String: Any] = ["t": (Date().timeIntervalSince(t0) * 1000).rounded() / 1000, "w": (Date().timeIntervalSince1970 * 1000).rounded() / 1000, "kind": kind, "text": text]
+    var o: [String: Any] = ["t": (Date().timeIntervalSince(t0) * 1000).rounded() / 1000, "w": (Date().timeIntervalSince1970 * 1000).rounded() / 1000, "kind": kind, "text": text]
+    if let q = q { o["q"] = q }          // "fast" = quick small model (spots references); absent = the careful model
     if let d = try? JSONSerialization.data(withJSONObject: o), let s = String(data: d, encoding: .utf8) {
         if let h = outHandle { h.write((s + "\n").data(using: .utf8)!) } else { print(s) }
     }
@@ -105,6 +106,15 @@ final class WhisperListener {
     let silenceSeconds: Double
     let maxUtterance: Double
     let overlapSeconds = 3.0
+    // Two-speed decoding: a small quick model reads the growing sentence every 0.3 s and only has to spot a reference early; the larger
+    // model keeps its own pace and confirms. Fast results are tagged q="fast" so the follower can treat them as a hint.
+    var fastURL: URL? = nil
+    var fastInFlight = false
+    var fastLastAt = Date.distantPast
+    var fastLastText = ""
+    let fastStep = Double(opt("--fast-step") ?? "") ?? 0.3
+    let fastWindow = Double(opt("--fast-seconds") ?? "") ?? 6.0
+    let fastWork = DispatchQueue(label: "whisper.fast")
     let partialSeconds = Double(opt("--partial-seconds") ?? "") ?? 8.0     // live updates look at the last 8 s only; the final cut keeps the whole sentence
 
     init(url: URL, prompt: String, t0: Date, step: Double, silence: Double, maxUtter: Double) {
@@ -163,6 +173,8 @@ final class WhisperListener {
                 job = (utterStart, end, false)
             }
         }
+        var fastJob: (Int, Int)? = nil
+        if inUtterance, fastURL != nil, !fastInFlight, now.timeIntervalSince(fastLastAt) >= fastStep, Double(end - utterStart) / Double(rate) > 0.5 { fastJob = (utterStart, end) }
         // Free old audio, but never in the same tick that hands a sentence to be transcribed: the copy of that sentence is
         // taken in submit(), and trimming first used to cut it down to the last 2 seconds.
         if job == nil {
@@ -171,6 +183,7 @@ final class WhisperListener {
         }
         lock.unlock()
         if let j = job { submit(j.start, j.end, j.final) }
+        if let f = fastJob { submitFast(f.0, f.1) }
     }
 
     func submit(_ start: Int, _ end: Int, _ final: Bool) {
@@ -203,6 +216,25 @@ final class WhisperListener {
         }
     }
 
+    func submitFast(_ start: Int, _ end: Int) {
+        guard let furl = fastURL else { return }
+        lock.lock()
+        if fastInFlight { lock.unlock(); return }
+        let from = max(max(base, start), end - Int(fastWindow * Double(rate))) - base, to = min(total, end) - base
+        let slice = from < to ? Array(samples[from..<to]) : []
+        fastInFlight = true; fastLastAt = Date()
+        lock.unlock()
+        var loudest: Float = 0; let hop = rate / 10; var i0 = 0
+        while i0 < slice.count { let e = min(slice.count, i0 + hop); var ss: Float = 0; for k in i0..<e { ss += slice[k] * slice[k] }; loudest = max(loudest, (ss / Float(e - i0)).squareRoot()); i0 = e }
+        if slice.count < rate * 3 / 10 || loudest < max(0.012, floorLevel * 3) { lock.lock(); fastInFlight = false; lock.unlock(); return }
+        fastWork.async {
+            let text = self.transcribe(slice, to: furl, fast: true)
+            self.lock.lock(); self.fastInFlight = false; self.lock.unlock()
+            guard let t = text else { return }
+            if t != self.fastLastText { self.fastLastText = t; emit("partial", t, self.t0, q: "fast") }
+        }
+    }
+
     func wav(_ s: [Float]) -> Data {
         var d = Data()
         func u32(_ v: UInt32) { var x = v.littleEndian; d.append(Data(bytes: &x, count: 4)) }
@@ -216,7 +248,7 @@ final class WhisperListener {
         return d
     }
 
-    func transcribe(_ s: [Float]) -> String? {
+    func transcribe(_ s: [Float], to endpoint: URL? = nil, fast: Bool = false) -> String? {
         let boundary = "vv" + UUID().uuidString
         var body = Data()
         func field(_ n: String, _ v: String) { body.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(n)\"\r\n\r\n\(v)\r\n".data(using: .utf8)!) }
@@ -224,7 +256,7 @@ final class WhisperListener {
         if !prompt.isEmpty { field("prompt", prompt) }
         body.append("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\n".data(using: .utf8)!)
         body.append(wav(s)); body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
-        var req = URLRequest(url: url.appendingPathComponent("inference")); req.httpMethod = "POST"; req.timeoutInterval = 7
+        var req = URLRequest(url: (endpoint ?? url).appendingPathComponent("inference")); req.httpMethod = "POST"; req.timeoutInterval = fast ? 4 : 7
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type"); req.httpBody = body
         var result: String? = nil
         let done = DispatchSemaphore(value: 0)
@@ -249,6 +281,7 @@ if engineName == "whisper" {
     guard let u = opt("--whisper"), let url = URL(string: u) else { emit("status", "--whisper http://host:port is required", t0); exit(8) }
     let wl = WhisperListener(url: url, prompt: opt("--prompt") ?? "", t0: t0, step: Double(opt("--step") ?? "") ?? 0.5,
                              silence: Double(opt("--silence") ?? "") ?? 0.6, maxUtter: Double(opt("--max-utterance") ?? "") ?? 9)
+    if let f = opt("--fast"), let fu = URL(string: f) { wl.fastURL = fu }
     guard let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000, channels: 1, interleaved: false),
           let monoFmt = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: fmt.sampleRate, channels: 1, interleaved: false),
           let conv = AVAudioConverter(from: monoFmt, to: target) else { emit("status", "cannot convert audio", t0); exit(9) }

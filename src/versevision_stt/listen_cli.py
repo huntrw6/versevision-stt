@@ -23,6 +23,7 @@ VVADD = _P.vvadd
 WHISPER_DIR = _P.whisper_dir
 WHISPER_SERVER = _P.whisper_server
 WHISPER_PORT = 8178
+WHISPER_FAST_PORT = 8179
 # Telling Whisper which words to expect makes it spell books and numbers the way Scripture does.
 PROMPT = ("Sermon. Bible references: Genesis, Exodus, Psalm, Proverbs, Isaiah, Jeremiah, Habakkuk, Zephaniah, Matthew, Mark, Luke, John, Acts, "
           "Romans, 1 Corinthians, 2 Corinthians, Galatians, Ephesians, Philippians, Colossians, 1 Thessalonians, 2 Timothy, Philemon, Hebrews, "
@@ -39,16 +40,18 @@ def listen_command(
     device: Annotated[str, typer.Option("--device", help="Part of the input's name (default: Dante)")] = "Dante",
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Only log what it would show; put nothing on screen")] = False,
     hold: Annotated[float, typer.Option("--hold", help="Seconds a verse stays on screen after the speaker last touched it")] = 30.0,
-    presentation: Annotated[str, typer.Option("--presentation", help="Add every verse to this named presentation. Default: whichever presentation is open (selected) in ProPresenter at that moment")] = "",
-    no_add: Annotated[bool, typer.Option("--no-add", help="Do not add shown verses to a presentation")] = False,
-    preload: Annotated[int, typer.Option("--preload", help="Quietly load this many verses ahead into the presentation, so reading on is instant (0 = off)")] = 4,
+    add: Annotated[bool, typer.Option("--add/--no-add", help="Also add every shown verse to the presentation that is open in ProPresenter (off by default: the verses are only pulled up in the Bible search and put on the output)")] = False,
+    presentation: Annotated[str, typer.Option("--presentation", help="With --add: add to this named presentation instead of the open one")] = "",
+    preload: Annotated[int, typer.Option("--preload", "--ahead", help="Keep this many verses after the current one pulled up in the Bible search, ready to be put on the output with one click (0 = off)")] = 6,
+    fast: Annotated[bool, typer.Option("--fast/--no-fast", help="Two-speed hearing: a quick small model spots references early and the careful model confirms")] = True,
+    fast_model: Annotated[str, typer.Option("--fast-model", help="Whisper model for the quick pass")] = "base.en",
     follow: Annotated[bool, typer.Option("--follow/--no-follow", help="Move on to the next verse when the speaker starts reading it")] = True,
     content: Annotated[bool, typer.Option("--content/--no-content", help="Recognise a verse from its words when no reference was said")] = True,
     cooldown: Annotated[float, typer.Option("--cooldown", help="Do not show the same verse again within this many seconds")] = 30.0,
     settle: Annotated[float, typer.Option("--settle", help="Seconds a reference must stay unchanged before it is acted on")] = 0.8,
     seconds: Annotated[float, typer.Option("--seconds", help="Stop after this many seconds (0 = until stopped)")] = 0.0,
     engine: Annotated[str, typer.Option("--engine", help="whisper (default, more accurate) or apple")] = "whisper",
-    model: Annotated[str, typer.Option("--model", help="Whisper model: base.en, small.en (default) or medium.en")] = "small.en",
+    model: Annotated[str, typer.Option("--model", help="Whisper model for the careful pass: small.en (default), base.en or medium.en")] = "small.en",
     debug: Annotated[bool, typer.Option("--debug", help="Keep each cut of audio the listener sends to Whisper (in the run's log folder)")] = False,
 ) -> None:
     """Listen to the sermon and put the verses on screen. Ctrl-C stops it (and clears the screen).
@@ -57,6 +60,7 @@ def listen_command(
     to the presentation that is open in ProPresenter. It acts when the speaker says a reference, follows along as a passage is read, and recognises a
     verse from its words when the reference was never said.
     """
+    no_add = not add                       # by default nothing is added to any presentation
     from versevision_stt.follow import Action, Follower
     from versevision_stt.scripture import ScriptureIndex, default_dir, download
 
@@ -85,18 +89,26 @@ def listen_command(
             fh.write(line + "\n")
 
     started_server: subprocess.Popen | None = None
+    fast_server: subprocess.Popen | None = None
     if engine == "whisper":
-        started_server = _ensure_whisper_server(model)
+        # Both models share the CPU. Measured on the 10-core iMac Pro: with 10 threads each the careful pass slowed from 0.9 s to 2.6 s and
+        # timed out; 7 + 3 threads keep both quick (careful 0.8 s, quick 0.45 s).
+        cores = min(10, max(4, (os.cpu_count() or 8) // 2))
+        two = fast and fast_model != model
+        started_server = _ensure_whisper_server(model, threads=max(3, round(cores * 0.7)) if two else 0)
+        if two:
+            fast_server = _ensure_whisper_server(fast_model, port=WHISPER_FAST_PORT, threads=max(2, cores - max(3, round(cores * 0.7))))
     args = ["open", "-n", str(APP), "--args", "--out", str(raw), "--engine", engine]
     if engine == "whisper": args += ["--whisper", f"http://127.0.0.1:{WHISPER_PORT}", "--prompt", PROMPT, "--silence", "0.9"]
+    if engine == "whisper" and fast and fast_model != model and _server_up(WHISPER_FAST_PORT): args += ["--fast", f"http://127.0.0.1:{WHISPER_FAST_PORT}"]
     if debug: args += ["--debug-dir", str(run_dir / "audio")]
     if device: args += ["--device", device]
     if seconds: args += ["--seconds", str(seconds)]
     stop_allow = _auto_allow()
     subprocess.run(args, check=True)
-    where = (presentation or "the presentation open in ProPresenter") if (not no_add and not dry_run) else "nowhere"
+    where = (presentation or "the presentation open in ProPresenter") if (not no_add and not dry_run) else "no presentation (verses are only pulled up in the Bible search and put on the output)"
     log(f"Listening on '{device or 'the default input'}' with {engine}{' ' + model if engine == 'whisper' else ''}. "
-        f"{'DRY RUN, nothing is shown.' if dry_run else f'Verses stay up {hold:.0f} s and are added to: {where}.'}  Log: {run_dir}")
+        f"{'DRY RUN, nothing is shown.' if dry_run else f'Verses stay up {hold:.0f} s; added to: {where}. Hearing: {'two-speed (' + fast_model + ' spots, ' + model + ' confirms)' if (fast and fast_model != model) else 'one model'}.'}  Log: {run_dir}")
 
     follower = Follower(index=index if (content or follow) else None, hold=hold, cooldown=cooldown, follow=follow, content=content)
     follower.detector.settle = settle
@@ -212,11 +224,75 @@ def listen_command(
                 log(f"            (check) failed: {exc}")
         threading.Thread(target=work, daemon=True).start()
 
+    # ---- the default way of showing a verse: pull it up in the Bible search, check it, then click the result card
+    from versevision_stt.bibleui import VVBible
+    from versevision_stt.stage import Stage
+    bible_ui = VVBible(_P.vvbible) if (not dry_run and no_add and _P.vvbible.exists()) else None
+    stage = Stage(bible_ui, lambda b, c: max((v for (bb, cc, v) in index.by_ref if bb == b and cc == c), default=0) if index else 0, lookahead=preload, log=log) if bible_ui else None
+    pre_lock = threading.Lock()
+
+    def refill_async() -> None:
+        if not stage or preload <= 0 or not stage.needs_refill() or pre_lock.locked():
+            return
+        def work() -> None:
+            with pre_lock:
+                t0 = time.time()
+                with ui_lock:
+                    if not stage.needs_refill():
+                        return
+                    ok = stage.refill()
+                log(f"            pulled up the next verses in the Bible search ({'ok' if ok else 'failed'}) in {time.time() - t0:.2f}s; "
+                    f"ready: {', '.join(f'{c}:{v}' for c, v in stage.staged_verses())}")
+        threading.Thread(target=work, daemon=True).start()
+
+    def perform_stage(act: Action) -> None:
+        """show: put a verse (or one card of a long verse) on the output. stage: look the verse up and leave it ready, nothing on the output."""
+        assert stage and bible_ui
+        t0 = time.time()
+        want_version = pp_version(act.version)
+        if act.kind == "stage":
+            with ui_lock:
+                if stage.covers(act.book_id, act.chapter, act.verse):
+                    return
+                r = stage.prepare(act.book_id, act.book, act.chapter, act.verse, version=want_version, range_end=act.range_end)
+            log(f"            ready in {time.time() - t0:.2f}s (not on the output yet): {act.reference}" + (f" +{len(stage.staged_verses()) - 1} after it" if r else " FAILED"))
+            return
+        with ui_lock:
+            res = stage.show(act.book_id, act.book, act.chapter, act.verse, act.part, version=want_version if (act.version and want_version) else "", range_end=act.range_end)
+        if res.ok:
+            how = "from the Bible search, one click" if res.how == "click" else "looked up, then clicked"
+            extra = f"; this verse is {len(res.parts)} cards" if len(res.parts) > 1 else ""
+            log(f"            on screen in {time.time() - t0:.2f}s ({how}){extra}{'; ' + res.note if res.note else ''}")
+            follower.note_parts(act.book_id, act.chapter, act.verse, res.parts)
+            refill_async()
+        else:
+            log(f"            FAILED to show {act.reference}: {res.note}")
+
     def perform(act: Action) -> None:
+        if stage and act.kind in ("show", "stage"):
+            what = {"stage": "would pull up" if dry_run else "pull up   ", "show": "would show" if dry_run else "show      "}[act.kind]
+            ref_text = act.reference + (f" card {act.part}" if act.part > 1 else "")
+            flag = (" (a guess: checked against the words that follow)" if act.reason.startswith("assumed") else " (tentative: earliest of several equally good matches)") if act.tentative else ""
+            log(f"[{_stamp(act.t)}] {what}      {ref_text:22} because {act.reason}; heard: {act.heard!r}{flag}")
+            if not dry_run:
+                perform_stage(act)
+            return
+        if act.kind == "stage":
+            return
         if act.kind == "clear":
             log(f"[{_stamp(act.t)}] clear           {act.reason}")
             if not dry_run:
                 clear_screen()
+            return
+        if act.part > 1:
+            log(f"[{_stamp(act.t)}] {'would show' if dry_run else 'show      '}      {act.reference + ' card ' + str(act.part):22} because {act.reason}; heard: {act.heard!r}")
+            if not dry_run and stage:
+                perform_stage(act)
+            return
+        if act.kind == "stage":
+            log(f"[{_stamp(act.t)}] {'would pull up' if dry_run else 'pull up   '}      {act.reference:22} because {act.reason}; heard: {act.heard!r}")
+            if not dry_run:
+                perform_stage(act)
             return
         flag = (" (a guess: checked against the words that follow)" if act.reason.startswith("assumed") else " (tentative: earliest of several equally good matches)") if act.tentative else ""
         log(f"[{_stamp(act.t)}] {'would show' if dry_run else 'show      '}      {act.reference:22} because {act.reason}; heard: {act.heard!r}{flag}")
@@ -303,6 +379,10 @@ def listen_command(
         subprocess.run(["pkill", "-f", "VerseVision Listen.app/Contents/MacOS/vvlisten"], capture_output=True)
         if started_server is not None:
             started_server.terminate()
+        if fast_server is not None:
+            fast_server.terminate()
+        if bible_ui is not None:
+            bible_ui.close()
     typer.echo(f"Stopped. Log: {run_dir}")
 
 
@@ -433,44 +513,45 @@ def _auto_allow(seconds: float = 25.0):
     return stop.set
 
 
-def _server_up() -> bool:
+def _server_up(port: int | None = None) -> bool:
     import httpx
     try:
-        return httpx.get(f"http://127.0.0.1:{WHISPER_PORT}/", timeout=1.0).status_code < 500
+        return httpx.get(f"http://127.0.0.1:{port or WHISPER_PORT}/", timeout=1.0).status_code < 500
     except Exception:
         return False
 
 
-def _ensure_whisper_server(model: str) -> "subprocess.Popen | None":
+def _ensure_whisper_server(model: str, port: int | None = None, threads: int = 0) -> "subprocess.Popen | None":
     """Start the local Whisper server if it is not already running. Returns the process we started (to stop later)."""
-    if _server_up():
+    port = port or WHISPER_PORT
+    if _server_up(port):
         return None
     model_file = WHISPER_DIR / "models" / f"ggml-{model}.bin"
     if not WHISPER_SERVER.exists() or not model_file.exists():
         typer.secho(f"Whisper is not installed ({WHISPER_SERVER} / {model_file.name}). Run: versevision-stt install   (or use --engine apple)", fg="red")
         raise typer.Exit(2)
     # -t 10: all the iMac Pro's cores; -ac 512: a 10 s attention window instead of 30 s (4x faster, same words for sentences this short)
-    proc = subprocess.Popen([str(WHISPER_SERVER), "-m", str(model_file), "-t", str(min(10, max(4, (os.cpu_count() or 8) // 2))), "-ac", "512", "-nf",
-                             "--port", str(WHISPER_PORT), "--host", "127.0.0.1"],
+    proc = subprocess.Popen([str(WHISPER_SERVER), "-m", str(model_file), "-t", str(threads or min(10, max(4, (os.cpu_count() or 8) // 2))), "-ac", "512", "-nf",
+                             "--port", str(port), "--host", "127.0.0.1"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={**os.environ, "DYLD_LIBRARY_PATH": str(_P.whisper_bin_dir)})
     for _ in range(100):
-        if _server_up(): break
+        if _server_up(port): break
         time.sleep(0.2)
     else:
         proc.terminate(); typer.secho("The Whisper server did not start.", fg="red"); raise typer.Exit(2)
-    _warm_up()
+    _warm_up(port)
     typer.echo(f"Whisper {model} ready.")
     return proc
 
 
-def _warm_up() -> None:
+def _warm_up(port: int | None = None) -> None:
     """The first request to a fresh server is slow (it loads buffers). Send a second of silence so a real sentence is not."""
     import httpx, io, wave
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(b"\x00\x00" * 16000)
     try:
-        httpx.post(f"http://127.0.0.1:{WHISPER_PORT}/inference", files={"file": ("w.wav", buf.getvalue(), "audio/wav")},
+        httpx.post(f"http://127.0.0.1:{port or WHISPER_PORT}/inference", files={"file": ("w.wav", buf.getvalue(), "audio/wav")},
                    data={"temperature": "0.0", "response_format": "json"}, timeout=30)
     except Exception:
         pass

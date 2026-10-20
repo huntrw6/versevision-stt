@@ -43,6 +43,10 @@ class Paths:
         return self.home / "vvadd"
 
     @property
+    def vvbible(self) -> Path:
+        return self.home / "vvbible"
+
+    @property
     def vvdialog(self) -> Path:
         return self.home / "vvdialog"
 

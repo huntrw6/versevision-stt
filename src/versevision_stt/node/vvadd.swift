@@ -15,8 +15,8 @@ func key(_ code: CGKeyCode) { for d in [true, false] { CGEvent(keyboardEventSour
 func api(_ path: String) -> [String: Any]? { guard let u = URL(string: "http://127.0.0.1:1025" + path), let d = try? Data(contentsOf: u) else { return nil }; return (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] }
 
 let args = Array(CommandLine.arguments.dropFirst())
-var mode = "add"; var refs: [String] = []; var trace = false; var verifyEach = false; var waitMenu = false; var showSeconds = 0.0; var keepOnScreen = false; var alsoAdd = false; var backToShow = false; var wantVersion = ""
-for a in args { if a == "--live" { mode = "live" } else if a == "--trace" { trace = true } else if a == "--verify-each" { verifyEach = true } else if a == "--wait-menu" { waitMenu = true } else if a == "--keep" { keepOnScreen = true; mode = "live" } else if a == "--add" { alsoAdd = true } else if a == "--back" { backToShow = true } else if a.hasPrefix("--version=") { wantVersion = String(a.dropFirst(10)) } else if a.hasPrefix("--show=") { showSeconds = Double(a.dropFirst(7)) ?? 10; mode = "live" } else { refs.append(a) } }
+var mode = "add"; var refs: [String] = []; var trace = false; var verifyEach = false; var waitMenu = false; var showSeconds = 0.0; var keepOnScreen = false; var alsoAdd = false; var backToShow = false; var wantVersion = ""; var lookupOnly = false; var clickCard = 0; var cardsInfo = false; var stepDir = ""; var advanceMode = ""; var listModes = false
+for a in args { if a == "--live" { mode = "live" } else if a == "--trace" { trace = true } else if a == "--verify-each" { verifyEach = true } else if a == "--wait-menu" { waitMenu = true } else if a == "--keep" { keepOnScreen = true; mode = "live" } else if a == "--add" { alsoAdd = true } else if a == "--back" { backToShow = true } else if a == "--lookup-only" { lookupOnly = true } else if a == "--next" { stepDir = "go forward" } else if a == "--prev" { stepDir = "go back" } else if a == "--modes" { listModes = true } else if a.hasPrefix("--advance=") { advanceMode = String(a.dropFirst(10)) } else if a == "--cards" { cardsInfo = true } else if a.hasPrefix("--click=") { clickCard = Int(a.dropFirst(8)) ?? 1 } else if a.hasPrefix("--version=") { wantVersion = String(a.dropFirst(10)) } else if a.hasPrefix("--show=") { showSeconds = Double(a.dropFirst(7)) ?? 10; mode = "live" } else { refs.append(a) } }
 guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.renewedvision.propresenter").first else { print("ProPresenter not running"); exit(1) }
 let ax = AXUIElementCreateApplication(app.processIdentifier)
 // Bring ProPresenter to the front first, because typed keys and clicks go to whatever app is in front.
@@ -139,6 +139,54 @@ func activeName() -> String {
 }
 let T0 = now()
 var ok = 0, failed: [String] = [], wrong: [String] = []
+// ---- Bible results already on the panel: step through them or click a card (no lookup)
+func advancePopup() -> AXUIElement? {      // the "Verse" drop-down that decides what the < > buttons advance by
+    var pops: [AXUIElement] = []
+    findAll(area, 0, { s($0, kAXRoleAttribute) == "AXPopUpButton" && ["Verse", "Slide", "Chapter", "Book", "Page"].contains(s($0, kAXValueAttribute)) }, &pops)
+    return pops.first
+}
+if listModes {
+    for pop in [advancePopup()].compactMap({ $0 }) {
+        print("advance by:", s(pop, kAXValueAttribute))
+        AXUIElementPerformAction(pop, kAXPressAction as CFString)
+        var items: [AXUIElement] = []; let dl = now() + 1
+        while items.isEmpty && now() < dl { findAll(pop, 0, { s($0, kAXRoleAttribute) == "AXMenuItem" }, &items); if items.isEmpty { usleep(3_000) } }
+        print("  options:", items.map { s($0, kAXTitleAttribute) }.joined(separator: " | ")); key(53)
+    }
+    exit(0)
+}
+if !advanceMode.isEmpty, let pop = advancePopup(), s(pop, kAXValueAttribute) != advanceMode {
+    AXUIElementPerformAction(pop, kAXPressAction as CFString)
+    var items: [AXUIElement] = []; let dl = now() + 1
+    while items.isEmpty && now() < dl { findAll(pop, 0, { s($0, kAXRoleAttribute) == "AXMenuItem" }, &items); if items.isEmpty { usleep(3_000) } }
+    if let it = items.first(where: { s($0, kAXTitleAttribute) == advanceMode }) { AXUIElementPerformAction(it, kAXPressAction as CFString); print("  advance by -> \(advanceMode)") } else { key(53) }
+}
+func cardCenter(_ n: Int) -> CGPoint? {          // card n (1 = first) in the results grid. Cards are 333 x 205 with 13 / 15 px gaps, 22 / 14 px in.
+    guard let r = results, n >= 1 else { return nil }
+    let cols = max(1, Int((r.width - 22 + 13) / 346))
+    let i = n - 1
+    return CGPoint(x: r.minX + 22 + CGFloat(i % cols) * 346 + 166, y: r.minY + 14 + CGFloat(i / cols) * 220 + 100)
+}
+if clickCard > 0 {
+    let t0 = now()
+    guard let pt = cardCenter(clickCard) else { print("results area not found"); exit(7) }
+    let before = activeName()
+    click(pt)
+    var shown = ""; let dl = now() + 1.5
+    while now() < dl { shown = activeName(); if shown != before || liveLayer() && shown != "" { break }; usleep(3_000) }
+    print(String(format: "  clicked card %d in %.0f ms; live: '%@'", clickCard, (now() - t0) * 1000, shown))
+    if backToShow { goBackToShow({ _ in }) }
+    exit(0)
+}
+if !stepDir.isEmpty {
+    let t0 = now()
+    guard let b = find(area, 0, { s($0, kAXRoleAttribute) == "AXButton" && s($0, kAXDescriptionAttribute) == stepDir }) else { print("step button not found"); exit(7) }
+    let before = activeName()
+    AXUIElementPerformAction(b, kAXPressAction as CFString)
+    print(String(format: "  stepped (%@) in %.0f ms; was '%@'", stepDir, (now() - t0) * 1000, before))
+    exit(0)
+}
+
 for ref in refs {
     let t0 = now(); var marks: [String] = []
     func m(_ l: String) { marks.append(String(format: "%@ %.0f", l, (now() - t0) * 1000)) }
@@ -154,6 +202,10 @@ for ref in refs {
     m(started ? "started" : "nostart")
     if started { let t2 = now() + 4; while now() < t2 && busy() { usleep(1_000) } } else { usleep(60_000) }
     m("loaded")
+    if lookupOnly {
+        print(String(format: "  %-22@ looked up, results left open, in %4.0f ms", ref as NSString, (now() - t0) * 1000) + (trace ? "   [" + marks.joined(separator: ", ") + "]" : ""))
+        ok += 1; continue
+    }
     if mode == "live" && showSeconds == 0 && !keepOnScreen, let r = results { click(CGPoint(x: r.minX + 333, y: r.minY + 190)); m("clicked") }
     if showSeconds > 0 || keepOnScreen {
         // Click the first result, then make sure ProPresenter reports THIS verse as the live one (not just "something is live",

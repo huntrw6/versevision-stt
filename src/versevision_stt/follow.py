@@ -22,7 +22,7 @@ from .scripture import ScriptureIndex, normalize
 
 @dataclass
 class Action:
-    kind: str                    # "show" | "clear"
+    kind: str                    # "show" | "clear" | "stage" (look the verse up and leave it ready; nothing goes on the output)
     t: float
     reason: str = ""
     book_id: str = ""
@@ -35,10 +35,11 @@ class Action:
     version_source: str = ""                     # "said" or "wording"
     late_version: bool = False                   # the version was said after the verse was already shown: show the same verse again in it
     tentative: bool = False                      # chosen as the earliest of several equally good matches
+    part: int = 1                                # which card of a verse that did not fit one slide (1 = the first)
 
     @property
     def reference(self) -> str:
-        return f"{self.book} {self.chapter}:{self.verse}" if self.kind == "show" else ""
+        return f"{self.book} {self.chapter}:{self.verse}" if self.kind in ("show", "stage") else ""
 
 
 @dataclass
@@ -71,6 +72,9 @@ class Shown:
     assumed_at: float = 0.0
     assumed_from: tuple[str, int, int] | None = None   # the verse that was on screen before the assumption
     confirmed: bool = False
+    parts: list = field(default_factory=list)    # the words of each card when the verse spans several slides (set by the display layer)
+    part: int = 1                                # the card that is on the output
+    part_at: float = 0.0
     read_started: float = 0.0                    # when the speaker began reading this verse (first voice after it came up)
     version_shown: str = ""
 
@@ -100,6 +104,11 @@ class Follower:
     chapter_pause: float = 1.2           # a chapter-only mention must stay unchanged this long (a pause) before it is re-read as chapter + verse
     chapter_window: float = 12.0         # ... and the verse must start being read within this long
     pending: list = field(default_factory=list)
+    fast_agree: int = 2                  # the quick model must give the same reference this many times running before it is staged
+    part_threshold: float = 82.0         # how well the opening of the next card must match what was just said (0-100)
+    _fast_key: tuple | None = None
+    _fast_count: int = 0
+    staged: dict = field(default_factory=dict)      # (book_id, chapter, verse) -> time the quick model first asked for it
     _last_text: str = ""
     wps: float = 2.7                     # the speaker's reading pace in words per second of speech; learned as verses are read
     min_read_seconds: float = 2.5        # a verse must have been on screen this long before the next one can be guessed
@@ -132,6 +141,8 @@ class Follower:
                     self._segments[-1][1] = t
                 return self.tick(t) + self._judge_assumption(t, self._last_text, speech_ended=True)
             return self.tick(t) + self._judge_assumption(t, self._last_text)
+        if item.get("q") == "fast":
+            return self._from_fast(t, item.get("text", ""))
         item = self.continuer.process(item)
         text = item.get("text", "")
         self._last_text = text
@@ -152,6 +163,9 @@ class Follower:
             if not self.current.assumed:
                 share, _ = self.index.progress(text, self.current.book_id, self.current.chapter, self.current.verse)
                 self.current.reading_share = max(self.current.reading_share, share)
+        stepped = self._next_part(t, text)
+        if stepped:
+            actions.append(stepped)
         judged = self._judge_assumption(t, text)
         if judged:
             actions += judged
@@ -227,6 +241,76 @@ class Follower:
             if self.current:
                 self.current.version_said, self.current.version_shown = True, ref.version
         return act
+
+    # ------------------------------------------------------------------ two-speed hearing
+    def _from_fast(self, t: float, text: str) -> list[Action]:
+        """The quick small model reads the growing sentence every ~0.3 s. It is less accurate than the careful model, so it never puts a
+        verse on the output. What it can do cheaply is spot a spoken reference early: the verse is then looked up and left ready, and the
+        careful model's confirmation a moment later only has to click it. It can also step through the cards of a long verse."""
+        out: list[Action] = []
+        part = self._next_part(t, text, fast=True)
+        if part:
+            out.append(part)
+        found = find_spoken_references(text)
+        key = None
+        ref = None
+        if found:
+            ref = found[-1].reference
+            if ref.spans and ref.spans[0].start.verse:
+                sp = ref.spans[0]
+                key = (ref.book_id, sp.start.chapter, sp.start.verse, (sp.end.chapter, sp.end.verse) if sp.end else None)
+        if key is None:
+            self._fast_key, self._fast_count = None, 0
+            return out
+        if key == self._fast_key:
+            self._fast_count += 1
+        else:
+            self._fast_key, self._fast_count = key, 1
+        book_id, chapter, verse, end = key
+        if self._fast_count != self.fast_agree:
+            return out
+        if self.current and (self.current.book_id, self.current.chapter, self.current.verse) == (book_id, chapter, verse):
+            return out
+        if (book_id, chapter, verse) in self.staged and t - self.staged[(book_id, chapter, verse)] < self.cooldown:
+            return out
+        if self.index and not self.index.has_verse(book_id, chapter, verse):
+            return out
+        self.staged[(book_id, chapter, verse)] = t
+        out.append(Action("stage", t, reason="the quick model heard a reference", book_id=book_id, book=ref.book_display_name, chapter=chapter, verse=verse,
+                          heard=found[-1].heard, range_end=end if (end and end[0] == chapter) else None))
+        return out
+
+    def note_parts(self, book_id: str, chapter: int, verse: int, parts: list[str]) -> None:
+        """The display layer reports how many cards the verse on the output has (and their words)."""
+        c = self.current
+        if c and (c.book_id, c.chapter, c.verse) == (book_id, chapter, verse):
+            c.parts = [p for p in parts if p]
+
+    def _next_part(self, t: float, text: str, fast: bool = False) -> Action | None:
+        """A verse that did not fit one slide is several cards. Move to the next card when the speaker reaches its first words."""
+        c = self.current
+        if not c or len(c.parts) < 2 or c.part >= len(c.parts):
+            return None
+        if t - c.part_at < 1.0:
+            return None
+        from rapidfuzz import fuzz
+        tail = " ".join(normalize(text).split()[-16:])
+        if len(tail.split()) < 3:
+            return None
+        for q in range(c.part + 1, len(c.parts) + 1):
+            opening = " ".join(normalize(c.parts[q - 1]).split()[:6])
+            if len(opening.split()) < 3:
+                continue
+            if fuzz.partial_ratio(opening, tail) >= self.part_threshold and fuzz.partial_ratio(" ".join(opening.split()[:3]), tail) >= 90:
+                # not still reading the end of the card that is up
+                end_words = " ".join(normalize(c.parts[c.part - 1]).split()[-4:])
+                # the card's opening must come AFTER the end of the card that is up (not just overlap it)
+                if tail.rfind(" ".join(opening.split()[:3])) < tail.rfind(end_words.split()[-1]) - 2 and fuzz.partial_ratio(end_words, tail[-len(end_words) - 6:]) >= 95:
+                    return None
+                c.part, c.part_at, c.last_activity = q, t, t
+                return Action("show", t, reason=f"the speaker reached card {q} of {len(c.parts)}{' (quick model)' if fast else ''}", book_id=c.book_id, book=c.book,
+                              chapter=c.chapter, verse=c.verse, heard=text[-60:], part=q)
+        return None
 
     def _late_version(self, t: float, text: str) -> Action | None:
         """"Romans 8:28" ... pause ... "in the New Living Translation": Whisper often splits these. A version named within a few
@@ -358,6 +442,8 @@ class Follower:
             return None
         if t - cur.shown_at < self.min_read_seconds:
             return None                                   # the verse only just came up: it cannot have been read through yet
+        if len(cur.parts) > 1 and cur.part < len(cur.parts):
+            return None                                   # a long verse: its last card has not come up yet, so the speaker is not past it
         nxt = self._next_in_line(cur)
         return (cur, nxt) if nxt else None
 

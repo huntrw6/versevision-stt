@@ -162,8 +162,8 @@ def test_listen_defaults_are_dante_displayed_thirty_seconds_into_verses():
     import inspect
     from versevision_stt.listen_cli import listen_command
     p = inspect.signature(listen_command).parameters
-    assert p["device"].default == "Dante" and p["hold"].default == 30.0 and p["presentation"].default == ""
-    assert p["dry_run"].default is False and p["no_add"].default is False and p["follow"].default is True and p["content"].default is True
+    assert p["device"].default == "Dante" and p["hold"].default == 30.0 and p["presentation"].default == "" and p["add"].default is False and p["preload"].default == 6 and p["fast"].default is True
+    assert p["dry_run"].default is False and p["follow"].default is True and p["content"].default is True
 
 
 def test_a_named_range_is_expanded_to_the_verses_a_lookup_produces():
