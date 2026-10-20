@@ -1,8 +1,8 @@
 import pytest
 
-from versevision.follow import Follower
-from versevision.listen import Detector
-from versevision.scripture import ScriptureIndex, Verse
+from versevision_stt.follow import Follower
+from versevision_stt.listen import Detector
+from versevision_stt.scripture import ScriptureIndex, Verse
 
 # Public-domain KJV wording for a handful of verses (the real index holds the whole KJV and the BSB).
 KJV = {
@@ -221,8 +221,8 @@ def test_the_first_show_of_a_named_range_carries_the_range_so_it_can_be_loaded_a
 
 def test_propresenter_usx_bibles_are_read_without_footnotes_or_headings(tmp_path):
     import zipfile
-    from versevision.references.books import BOOKS
-    from versevision.scripture import load_propresenter_bibles
+    from versevision_stt.references.books import BOOKS
+    from versevision_stt.scripture import load_propresenter_bibles
     usx = ('<?xml version="1.0" encoding="utf-8"?><usx version="2.6"><book code="JHN" style="id" /><para style="h">John</para>'
            '<chapter number="3" style="c" /><para style="s1">God So Loved the World</para><para style="p">'
            '<verse number="16" style="v" /><note caller="+" style="x"><char style="xo">3:16 </char><char style="xt">Rom. 5:8</char></note>'
@@ -234,7 +234,7 @@ def test_propresenter_usx_bibles_are_read_without_footnotes_or_headings(tmp_path
             z.writestr(f"release/USX_1/{b.id}.usx", usx if b.id == "JHN" else "<usx><book code='X'/></usx>")
     got = load_propresenter_bibles(tmp_path)
     # a Bible with almost no verses is skipped by the size check, so look at the parser directly
-    from versevision.scripture import _usx_book
+    from versevision_stt.scripture import _usx_book
     verses = _usx_book(usx.encode())
     assert verses[(3, 16)] == "For God so loved the world, that he gave his only Son, that whoever believes in him should not perish."
     assert verses[(3, 17)] == "For God did not send his Son into the world." and "God So Loved" not in " ".join(verses.values())
@@ -269,7 +269,7 @@ def test_a_version_is_recognised_from_the_wording_only_when_one_bible_clearly_fi
 
 
 def test_pp_version_names():
-    from versevision.listen_cli import pp_version
+    from versevision_stt.listen_cli import pp_version
     assert pp_version("NIV") == "New International Version" and pp_version("NASB") == "New American Standard Bible 1995"
     assert pp_version("MSG") == "" and pp_version("") == ""
 
@@ -555,7 +555,7 @@ def test_a_guess_is_not_withdrawn_in_its_first_seconds_on_garbled_words_alone():
 
 # ---------------------------------------------------------------- the verse slide map
 def test_slide_map_finds_verse_slides_from_their_text():
-    from versevision.slidemap import SlideMap
+    from versevision_stt.slidemap import SlideMap
     texts = ["1) Test point", "John 3:16 (NIV)\nFor God so loved", "James 1:2 (ESV)\nCount it all joy", "James 1:3 (ESV)\nfor you know", "James 1:4 (NIV)\nAnd let", "Psalm 23:1 (NKJV)\nThe LORD"]
     m = SlideMap.from_texts("U", texts)
     assert m.find("JAS", 1, 3).index == 3 and m.find("JAS", 1, 4).version == "NIV" and m.find("PSA", 23, 1).index == 5
@@ -564,20 +564,20 @@ def test_slide_map_finds_verse_slides_from_their_text():
 
 
 def test_slide_map_prefers_the_version_in_use_and_otherwise_the_newest():
-    from versevision.slidemap import SlideMap
+    from versevision_stt.slidemap import SlideMap
     m = SlideMap.from_texts("U", ["James 1:3 (ESV)\nx", "James 1:3 (NIV)\nx", "James 1:3 (ESV)\nx"])
     assert m.find("JAS", 1, 3, prefer="NIV").index == 1 and m.find("JAS", 1, 3).index == 2
 
 
 def test_slide_map_reports_which_verses_ahead_are_already_slides():
-    from versevision.slidemap import SlideMap
+    from versevision_stt.slidemap import SlideMap
     m = SlideMap.from_texts("U", ["James 1:2 (ESV)\nx", "James 1:3 (ESV)\nx", "James 1:4 (ESV)\nx", "James 1:6 (ESV)\nx"])
     have, missing = m.ahead("JAS", 1, 2, 4)
     assert have == [3, 4, 6] and missing == [5]
 
 
 def test_slide_map_ignores_slides_that_are_not_bible_lookups():
-    from versevision.slidemap import SlideMap
+    from versevision_stt.slidemap import SlideMap
     m = SlideMap.from_texts("U", ["Title Slide 10sec", "Welcome to church at 10:30 (the service)", "", "Romans 8:28 (NIV) And we know"])
     assert list(m.verses) == [("ROM", 8, 28)]
 

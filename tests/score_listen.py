@@ -1,7 +1,7 @@
 """Replay a listening log through the Follower and score the screen against what was actually being read."""
 import json, sys, time
-from versevision.follow import Follower
-from versevision.scripture import ScriptureIndex, normalize
+from versevision_stt.follow import Follower
+from versevision_stt.scripture import ScriptureIndex, normalize
 idx = ScriptureIndex.load()
 
 def truth_verse(book, chap, text, nverses):

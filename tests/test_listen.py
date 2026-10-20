@@ -1,5 +1,5 @@
-from versevision.listen import Detector, run
-from versevision.references.spoken import find_spoken_references
+from versevision_stt.listen import Detector, run
+from versevision_stt.references.spoken import find_spoken_references
 
 
 def refs(text):
@@ -153,22 +153,22 @@ def test_a_reference_split_by_a_pause_is_read_whole():
 
 
 def test_psalms_is_looked_up_as_psalm():
-    from versevision.listen_cli import _lookup_text
+    from versevision_stt.listen_cli import _lookup_text
     assert _lookup_text("Psalms 23:1-3") == "Psalm 23:1-3"
     assert _lookup_text("John 3:16") == "John 3:16"
 
 
 def test_listen_defaults_are_dante_displayed_thirty_seconds_into_verses():
     import inspect
-    from versevision.listen_cli import listen_command
+    from versevision_stt.listen_cli import listen_command
     p = inspect.signature(listen_command).parameters
     assert p["device"].default == "Dante" and p["hold"].default == 30.0 and p["presentation"].default == ""
     assert p["dry_run"].default is False and p["no_add"].default is False and p["follow"].default is True and p["content"].default is True
 
 
 def test_a_named_range_is_expanded_to_the_verses_a_lookup_produces():
-    from versevision.listen_cli import _range_text, range_verses
-    from versevision.scripture import ScriptureIndex, Verse
+    from versevision_stt.listen_cli import _range_text, range_verses
+    from versevision_stt.scripture import ScriptureIndex, Verse
     idx = ScriptureIndex({"KJV": [Verse("PSA", "Psalms", 23, n, f"verse {n} text of the psalm here today") for n in range(1, 7)]
                           + [Verse("GEN", "Genesis", 1, 31, "x y z a b c d e"), Verse("GEN", "Genesis", 2, 1, "x y z a b c d e"), Verse("GEN", "Genesis", 2, 2, "x y z a b c d e")]})
     assert range_verses(idx, "PSA", 23, 1, (23, 3)) == [(23, 1), (23, 2), (23, 3)]
@@ -176,3 +176,73 @@ def test_a_named_range_is_expanded_to_the_verses_a_lookup_produces():
     assert range_verses(idx, "GEN", 1, 31, (2, 2)) == [(1, 31), (2, 1), (2, 2)]
     assert _range_text("Psalms", 23, 1, (23, 3)) == "Psalms 23:1-3" and _range_text("Genesis", 1, 31, (2, 2)) == "Genesis 1:31-2:2"
     assert _range_text("John", 3, 16, None) == "John 3:16"
+
+
+def test_stt_uses_only_its_own_folders_and_never_the_importers(tmp_path, monkeypatch):
+    from versevision_stt import stt_paths
+    monkeypatch.delenv("VERSEVISION_STT_HOME", raising=False)
+    p = stt_paths.paths()
+    assert p.home.name == "VerseVision-STT" and "VerseVision-tools" not in str(p.home)
+    for sub in (p.home, p.data, p.logs):
+        assert "versevision-stt" in str(sub).lower() or sub.name == "VerseVision-STT"
+    old = stt_paths.legacy()
+    assert str(old.tools).endswith("VerseVision-tools") and old.tools != p.home and old.scripture != p.scripture and old.logs != p.logs / "listen"
+
+
+def test_environment_overrides_move_every_folder(tmp_path, monkeypatch):
+    from versevision_stt import stt_paths
+    monkeypatch.setenv("VERSEVISION_STT_HOME", str(tmp_path / "h")); monkeypatch.setenv("VERSEVISION_STT_DATA", str(tmp_path / "d")); monkeypatch.setenv("VERSEVISION_STT_LOGS", str(tmp_path / "l"))
+    p = stt_paths.paths()
+    assert p.app_binary == tmp_path / "h" / "VerseVision Listen.app" / "Contents" / "MacOS" / "vvlisten" and p.scripture == tmp_path / "d" / "scripture"
+    assert p.whisper_server == tmp_path / "h" / "whisper" / "whisper.cpp" / "build" / "bin" / "whisper-server" and p.logs == tmp_path / "l"
+
+
+def test_migration_copies_the_old_whisper_and_texts_and_leaves_the_originals(tmp_path, monkeypatch):
+    from versevision_stt import install_cli, stt_paths
+    old_tools = tmp_path / "VerseVision-tools"; (old_tools / "whisper" / "whisper.cpp" / "build2" / "bin").mkdir(parents=True)
+    (old_tools / "whisper" / "whisper.cpp" / "build2" / "bin" / "whisper-server").write_text("bin")
+    monkeypatch.setattr("versevision_stt.install_cli._build_is_safe", lambda d: d.name == "build2")
+    old_scr = tmp_path / "olddata" / "scripture"; old_scr.mkdir(parents=True); (old_scr / "KJV.json").write_text("{}")
+    monkeypatch.setattr(stt_paths, "legacy", lambda: stt_paths.LegacyPaths(old_tools, old_scr, tmp_path / "oldlogs"))
+    monkeypatch.setattr(install_cli, "legacy", stt_paths.legacy)
+    monkeypatch.setenv("VERSEVISION_STT_HOME", str(tmp_path / "new")); monkeypatch.setenv("VERSEVISION_STT_DATA", str(tmp_path / "newdata"))
+    p = stt_paths.paths()
+    done = install_cli.migrate_from_importer(p, lambda m: None)
+    assert set(done) == {"whisper", "bible texts"}
+    assert p.whisper_server.exists() and (p.scripture / "KJV.json").exists()
+    assert (old_tools / "whisper" / "whisper.cpp" / "build2" / "bin" / "whisper-server").exists() and (old_scr / "KJV.json").exists()
+
+
+def test_uninstall_never_touches_the_importers_folders(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    from versevision_stt.cli import app
+    importer_tools = tmp_path / "VerseVision-tools"; importer_tools.mkdir(); (importer_tools / "vvdialog").write_text("importer helper")
+    monkeypatch.setenv("VERSEVISION_STT_HOME", str(tmp_path / "VerseVision-STT")); monkeypatch.setenv("VERSEVISION_STT_DATA", str(tmp_path / "d")); monkeypatch.setenv("VERSEVISION_STT_LOGS", str(tmp_path / "l"))
+    home = tmp_path / "VerseVision-STT"; (home / "VerseVision Listen.app").mkdir(parents=True); (home / "vvadd").write_text("x")
+    result = CliRunner().invoke(app, ["uninstall", "--purge"])
+    assert result.exit_code == 0 and not home.exists()
+    assert (importer_tools / "vvdialog").read_text() == "importer helper"
+
+
+def test_the_command_has_listen_and_the_install_commands():
+    from typer.testing import CliRunner
+    from versevision_stt.cli import app
+    out = CliRunner().invoke(app, ["--help"]).output
+    for word in ("listen", "install", "update", "doctor", "uninstall"):
+        assert word in out
+
+
+def test_migration_prefers_the_tuned_build_and_refuses_an_unsafe_one(tmp_path, monkeypatch):
+    from versevision_stt import install_cli, stt_paths
+    old_tools = tmp_path / "VerseVision-tools"
+    for variant in ("build", "build2"):
+        d = old_tools / "whisper" / "whisper.cpp" / variant / "bin"; d.mkdir(parents=True); (d / "whisper-server").write_text(variant)
+    monkeypatch.setattr(stt_paths, "legacy", lambda: stt_paths.LegacyPaths(old_tools, tmp_path / "nodata", tmp_path / "nologs"))
+    monkeypatch.setattr(install_cli, "legacy", stt_paths.legacy)
+    monkeypatch.setenv("VERSEVISION_STT_HOME", str(tmp_path / "new")); monkeypatch.setenv("VERSEVISION_STT_DATA", str(tmp_path / "nd"))
+    monkeypatch.setattr(install_cli, "_build_is_safe", lambda d: d.name == "build2")
+    install_cli.migrate_from_importer(stt_paths.paths(), lambda m: None)
+    assert (tmp_path / "new" / "whisper" / "whisper.cpp" / "build" / "bin" / "whisper-server").read_text() == "build2"
+    monkeypatch.setattr(install_cli, "_build_is_safe", lambda d: False)
+    import shutil; shutil.rmtree(tmp_path / "new")
+    assert install_cli.migrate_from_importer(stt_paths.paths(), lambda m: None) == []

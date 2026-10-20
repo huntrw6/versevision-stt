@@ -1,4 +1,4 @@
-from versevision.references.models import PassageReference
+from versevision_stt.references.models import PassageReference
 
 
 def test_warnings_are_not_shared():

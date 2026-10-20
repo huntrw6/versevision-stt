@@ -1,6 +1,6 @@
 import pytest
 
-from versevision.references import parse_references
+from versevision_stt.references import parse_references
 
 
 @pytest.mark.parametrize(("source", "normalized"), [
